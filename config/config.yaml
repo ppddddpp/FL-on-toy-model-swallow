@@ -1,0 +1,24 @@
+# Training parameters
+epochs:    50
+patience:  10
+batch_size: 4
+lr:        2e-5
+seed:      2709
+
+# Model parameters
+max_seq_len: 512
+ffn_dim: 128
+num_heads: 2
+model_dim: 64
+dropout: 0.1
+num_layers: 1
+
+# Calibration / trust tuning parameters
+calib_interval: 10          # number of epochs between calibrations
+
+# FL parameters
+allow_dynamic_label_expansion: False
+share_label_space: true
+
+# Wandb parameters
+project_name: "fl-toy-experiments"
