@@ -4,9 +4,7 @@ import json
 import warnings
 import numpy as np
 from typing import Dict
-import pandas as pd
 
-from DataHandler.dataloader import ToyTextDataset
 
 def log_and_print(*msgs, log_file=None):
     """
@@ -77,26 +75,6 @@ def numpy_delta_to_torch(delta_numpy: Dict[str, np.ndarray], device, ref_state_d
         out[k] = t
     return out
 
-def toy_dataset_to_df(ds):
-    """Convert ToyTextDataset --> DataFrame(text, label)."""
-    return pd.DataFrame({
-        "text": ds.texts,
-        "label": ds.labels
-    })
-
-def df_to_toy_dataset(df, original_ds):
-    ds = ToyTextDataset(
-        texts=df["Information"].tolist(),
-        labels=df["Group"].tolist(),
-        vocab=original_ds.vocab,
-        max_len=original_ds.max_len,
-        num_classes=original_ds.num_classes
-    )
-    ds.text_col = getattr(original_ds, "text_col", "Information")
-    ds.label_col = getattr(original_ds, "label_col", "Group")
-    ds.df = df
-
-    return ds
 
 def ensure_dir(path):
     path = Path(path)
@@ -108,11 +86,6 @@ def save_json(obj, path):
     ensure_dir(path.parent)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(to_json_safe(obj), f, indent=2)
-
-def save_csv(df, path):
-    path = Path(path)
-    ensure_dir(path.parent)
-    df.to_csv(path, index=False)
 
 def to_json_safe(obj):
     if isinstance(obj, dict):
@@ -126,26 +99,3 @@ def to_json_safe(obj):
     if isinstance(obj, (np.int32, np.int64)):
         return int(obj)
     return obj
-
-def flatten_state_dict_to_tensor(state_dict):
-    """
-    Flattens a PyTorch state_dict (or any dict of tensors) into a single 1D tensor.
-    Useful for computing global norms or cosine similarity between updates.
-    """
-    # Sort keys to ensure consistent ordering every time
-    keys = sorted(state_dict.keys())
-    
-    # Flatten each tensor and collect them
-    tensors = []
-    for key in keys:
-        tensor = state_dict[key]
-        # Ensure it's a float tensor (sometimes buffers are int/long)
-        if not tensor.is_floating_point():
-            tensor = tensor.float()
-        tensors.append(tensor.view(-1)) # Flatten to 1D
-        
-    # Concatenate all into one giant vector
-    if not tensors:
-        return torch.tensor([])
-        
-    return torch.cat(tensors)

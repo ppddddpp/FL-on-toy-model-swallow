@@ -2,7 +2,6 @@ import os
 import torch
 from pathlib import Path
 import random
-from typing import Any
 import time
 import numpy as np
 import json
@@ -20,7 +19,7 @@ CKPT_BASELINE.mkdir(parents=True, exist_ok=True)
 
 class Server:
     def __init__(self, model_cls, 
-                    config=None, anchor_loader: Any = None,
+                    config=None, 
                     checkpoint_dir="checkpoints/base_model", device="cpu", 
                     dataset_path=None, ttl_path=None,
                     text_col=None, label_col=None, 
@@ -43,7 +42,7 @@ class Server:
         self.dataset_path = dataset_path or (BASE_DIR / "data" / "animal" / "base" / "base_model.csv")
         self.text_col = text_col or "text"
         self.label_col = label_col or "label"
-        self.ttl_path = ttl_path # Kept if needed for BaseTrainer, though KG defense is gone
+        self.ttl_path = ttl_path 
 
         # Load / Train Base Model
         self.global_model, self.base_vocab, self.base_label2id = self._load_or_train_base()
@@ -53,13 +52,8 @@ class Server:
         self.reputation_store = {}   
         self.ledger_store = []       
 
-        # --- INITIALIZE SELFCHECK (Streamlined) ---
-        if anchor_loader is None:
-            log_and_print("[WARNING] [Server] No anchor loader provided. Stage 2 (Semantic Check) will fail.", log_file=self.log_dir)
-
         self.selfcheck = SelfCheckManager(
             global_model=self.global_model,
-            anchor_loader=anchor_loader,
             log_dir=self.log_dir
         )
 
@@ -67,7 +61,7 @@ class Server:
         self.allow_dynamic_label_expansion = getattr(self.config, 'allow_dynamic_label_expansion', False)
         self.share_label_space = getattr(self.config, 'share_label_space', False)
 
-        log_and_print(f"[Server] Allow dynamic label expansion: {self.allow_dynamic_label_expansion}", log_file=self.log_dir)
+        log_and_print(f"[Server] Initialized (Sybil Mode). Label expansion: {self.allow_dynamic_label_expansion}", log_file=self.log_dir)
 
     def _load_or_train_base(self):
         latest_ckpt = self._get_latest_checkpoint()
@@ -110,10 +104,8 @@ class Server:
             best_pt_path = self.checkpoint_dir / "best.pt"
             
             if best_pt_path.exists():
-                log_and_print(f"[Server] Found best model at {best_pt_path}. Using this as the base.", log_file=self.log_dir)
                 latest_ckpt = best_pt_path
             else:
-                # Fallback: Save the final state from memory if no best.pt (e.g., if no validation set)
                 ckpt_path = self.checkpoint_dir / "epoch_final.pt"
                 torch.save(trainer.model.state_dict(), ckpt_path)
                 latest_ckpt = ckpt_path
@@ -130,17 +122,16 @@ class Server:
 
     def run_round(self, round_id, client_updates):
         """
-        Executes one FL round using the 3-Stage SelfCheck Pipeline.
+        Executes one FL round.
         """
         log_and_print(f"\n[Server] --- Round {round_id} starting ---", log_file=self.log_dir)
 
-        # Handle Dynamic Label Expansion (Optional - keeps your model flexible)
+        # Handle Dynamic Label Expansion (Optional)
         client_label_sets = [set(cu.get("labels", [])) for cu in client_updates if "labels" in cu]
         if self.allow_dynamic_label_expansion and client_label_sets:
             if self.share_label_space:
                 self.sync_labels_and_expand_model(client_label_sets)
             else:
-                # Privacy mode
                 private_label_union = set().union(*client_label_sets)
                 current_labels = set(self.base_label2id.keys())
                 unseen = private_label_union - current_labels
@@ -154,7 +145,7 @@ class Server:
             cid = cu["client_id"]
             delta = cu.get("delta", {}) or {}
             
-            # Ensure safe tensor format (CPU, float32) for analysis
+            # Ensure safe tensor format (CPU, float32)
             safe_delta = {}
             for k, v in delta.items():
                 if isinstance(v, torch.Tensor):
@@ -164,7 +155,6 @@ class Server:
             
             formatted_updates[cid] = safe_delta
 
-        # RUN SELFCHECK
         decisions, scores, public_out = self.selfcheck.run_round(
             client_updates=formatted_updates,
             round_id=round_id
@@ -178,9 +168,9 @@ class Server:
             
             if decision == "ACCEPT":
                 accepted_entries.append((
-                    cu["state_dict"],        # Full weights for aggregation
+                    cu["state_dict"],
                     cu.get("num_samples", 1),
-                    1.0                      # Trust Score
+                    1.0
                 ))
 
         # Ledger & Reputation Update
@@ -189,7 +179,6 @@ class Server:
             decision = decisions.get(cid, "REJECT")
             trust_val = 1.0 if decision == "ACCEPT" else 0.0
             
-            # Simple EMA reputation
             old_rep = self.reputation_store.get(cid, 0.5)
             new_rep = 0.8 * old_rep + 0.2 * trust_val
             self.reputation_store[cid] = new_rep
@@ -204,7 +193,7 @@ class Server:
             }
             self.update_ledger(entry)
 
-        # 6. Aggregation
+        # Aggregation
         if accepted_entries:
             new_global = self.aggregate_with_trust(accepted_entries)
             self.safe_load_state_dict(self.global_model, new_global)
@@ -221,13 +210,7 @@ class Server:
         return public_out
 
     def weighted_fedavg(self, client_updates):
-        """
-        Standard Weighted FedAvg.
-        client_updates: List of (state_dict, num_samples, trust_score)
-        """
         server_sd = self.global_model.state_dict()
-        
-        # Initialize accumulator
         new_state = {k: torch.zeros_like(v, device=self.device, dtype=v.dtype) for k, v in server_sd.items()}
         total_weight = 0.0
 
@@ -235,22 +218,20 @@ class Server:
             total_weight += (float(num) * float(trust))
 
         if total_weight <= 0:
-            return server_sd # No valid updates
+            return server_sd 
 
         for state, num, trust in client_updates:
             weight = (float(num) * float(trust)) / total_weight
             for k in new_state.keys():
                 if k in state:
                     val = state[k].to(self.device)
-                    # Simple shape check/adjust could go here if needed
+                    # Basic reshape fallback
                     if val.shape != new_state[k].shape:
-                            # Very basic reshape fallback
                             if val.numel() == new_state[k].numel():
                                 val = val.view_as(new_state[k])
                     
                     if val.shape == new_state[k].shape:
                         new_state[k] += val * weight
-
         return new_state
 
     def aggregate_with_trust(self, client_updates):
@@ -297,9 +278,6 @@ class Server:
             print(f"Ledger error: {e}")
 
     def safe_load_state_dict(self, model, state_dict):
-        """
-        Load model state dict safely, handling shape mismatches (e.g. dynamic classifier).
-        """
         model_dict = model.state_dict()
         compatible = {}
         for k, v in state_dict.items():
@@ -312,9 +290,6 @@ class Server:
         model.load_state_dict(compatible, strict=False)
 
     def sync_labels_and_expand_model(self, client_label_sets):
-        """
-        Basic logic to expand the final linear layer if new labels appear.
-        """
         current_labels = set(self.base_label2id.keys())
         new_labels = set().union(*client_label_sets) - current_labels
         if not new_labels: return
@@ -327,11 +302,10 @@ class Server:
         
         num_labels = len(self.base_label2id)
         
-        # Resize classifier
         classifier = None
         for name, module in self.global_model.named_modules():
             if isinstance(module, torch.nn.Linear):
-                classifier = module # Assuming last linear is classifier
+                classifier = module 
         
         if classifier:
             old_w = classifier.weight.data
