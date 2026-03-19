@@ -271,13 +271,28 @@ def main():
                         else:
                             labels.append("honest")
 
+                    # Stack + normalize (cosine space)
                     X = np.vstack(all_vectors)
                     X = normalize(X)
 
+                    # PCA
                     pca = PCA(n_components=2)
                     X_2d = pca.fit_transform(X)
 
+                    # Prepare reference for similarity
+                    b_vec = flatten(benign_reference)
+
+                    def cosine_sim(a, b):
+                        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+
+                    # Precompute magnitudes (avoid recomputing in loop)
+                    magnitudes = np.array([np.linalg.norm(v) for v in all_vectors])
+                    max_mag = magnitudes.max() + 1e-8
+
+                    # Plot
                     plt.figure()
+
+                    # Clusters from prover
                     clusters = prover.detect_density_clusters()
                     cluster_map = {}
                     for cluster_id, members in clusters.items():
@@ -286,19 +301,51 @@ def main():
 
                     for i, cu in enumerate(client_updates):
                         cid = cu["client_id"]
-                        
-                        if cid in attacker_ids:
-                            marker = 'x'
-                        else:
-                            marker = 'o'
+                        vec = all_vectors[i]
 
-                        color = cluster_map.get(cid, -1)  # -1 = noise
+                        # Marker
+                        marker = 'x' if cid in attacker_ids else 'o'
 
-                        plt.scatter(X_2d[i, 0], X_2d[i, 1], marker=marker, c=[color])
+                        # Cluster color
+                        color = cluster_map.get(cid, -1)
 
-                    plt.title(f"Client Update Clusters - Round {rnd}")
+                        # Magnitude to size
+                        mag = magnitudes[i]
+                        size = 30 + 120 * (mag / max_mag)
+
+                        # Similarity to annotation
+                        sim = cosine_sim(vec, b_vec)
+
+                        plt.scatter(
+                            X_2d[i, 0],
+                            X_2d[i, 1],
+                            marker=marker,
+                            c=[color],
+                            s=size
+                        )
+
+                        # Show similarity on plot
+                        plt.text(
+                            X_2d[i, 0],
+                            X_2d[i, 1],
+                            f"{sim:.2f}",
+                            fontsize=7
+                        )
+
+                    # Legend
+                    plt.scatter([], [], marker='o', label='Honest')
+                    plt.scatter([], [], marker='x', label='Attacker')
+                    plt.legend()
+
+                    # Title + PCA quality
+                    plt.title(f"Client Update Clusters - Round {rnd}\nExplained var: {pca.explained_variance_ratio_.sum():.2f}")
+
+                    # Save
                     plt.savefig(log_dir / f"cluster_round_{rnd}.png")
                     plt.close()
+
+                    # Optional: save embeddings for later analysis
+                    np.save(log_dir / f"cluster_round_{rnd}.npy", X_2d)
 
             # Update shared vector for coordinated attacks
             if run_cfg.sybil_mode in ("leader", "coordinated"):
