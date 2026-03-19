@@ -16,7 +16,11 @@ from Helpers.safe_ops import safe_param_subtract
 from EnviromentSetup.model.model import ToyBERTClassifier
 from EnviromentSetup.corrupt.corruptSetup import ExperimentConfig, AttackEngines
 from Helpers.Helpers import _device_from_state_dict, numpy_delta_to_torch, torch_delta_to_numpy
-from Helpers.Helpers import log_and_print
+from Helpers.Helpers import log_and_print, flatten, average_updates
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import normalize
+import matplotlib.pyplot as plt
 
 def main():
     BASE_DIR = Path(__file__).resolve().parent.parent
@@ -236,14 +240,65 @@ def main():
             # Audit the attack (Prover)
             if engines.enable_prover and sybil_updates:
                 prover = engines.make_sybil_prover(round_id=rnd)
+
+                benign_updates = {
+                    cu["client_id"]: torch_delta_to_numpy(cu["delta"])
+                    for cu in client_updates
+                    if cu["client_id"] not in attacker_ids
+                }
+
+                benign_reference = average_updates(benign_updates)
+
                 if prover is not None:
                     prover.observe(
-                        benign_update=None,
+                        benign_update=benign_reference,
                         malicious_updates=sybil_updates,
                         client_metadatas=client_metadatas,
                         fake_data_size=meta.get("num_samples")
                     )
                     prover.run()
+
+                    all_vectors = []
+                    labels = []
+
+                    for cu in client_updates:
+                        cid = cu["client_id"]
+                        vec = flatten(torch_delta_to_numpy(cu["delta"]))
+                        all_vectors.append(vec)
+
+                        if cid in attacker_ids:
+                            labels.append("attacker")
+                        else:
+                            labels.append("honest")
+
+                    X = np.vstack(all_vectors)
+                    X = normalize(X)
+
+                    pca = PCA(n_components=2)
+                    X_2d = pca.fit_transform(X)
+
+                    plt.figure()
+                    clusters = prover.detect_density_clusters()
+                    cluster_map = {}
+                    for cluster_id, members in clusters.items():
+                        for cid in members:
+                            cluster_map[cid] = cluster_id
+
+                    for i, cu in enumerate(client_updates):
+                        cid = cu["client_id"]
+                        
+                        if cid in attacker_ids:
+                            marker = 'x'
+                        else:
+                            marker = 'o'
+
+                        color = cluster_map.get(cid, -1)  # -1 = noise
+
+                        plt.scatter(X_2d[i, 0], X_2d[i, 1], marker=marker, c=[color])
+
+                    plt.title(f"Client Update Clusters - Round {rnd}")
+                    plt.savefig(log_dir / f"cluster_round_{rnd}.png")
+                    plt.close()
 
             # Update shared vector for coordinated attacks
             if run_cfg.sybil_mode in ("leader", "coordinated"):

@@ -48,9 +48,22 @@ class SybilClustering:
                 
             flat_vecs.append(vec)
 
+        # Directional dominance detection
+        X = np.vstack(flat_vecs)
+        X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+        mean_vec = np.median(X, axis=0)
+        norm_mean = np.linalg.norm(mean_vec) + 1e-8
+
+        alignments = [
+            np.dot(vec, mean_vec) / ((np.linalg.norm(vec) + 1e-8) * norm_mean)
+            for vec in X
+        ]
+
+        dominant_indices = [i for i, a in enumerate(alignments) if a > 0.9]
+
         # Compute Similarity Matrix
         try:
-            dists = pdist(flat_vecs, metric='cosine')
+            dists = pdist(X, metric='cosine')
             # Handle numerical instability where distance might be slightly < 0 or > 2 or NaN
             dists = np.nan_to_num(dists, nan=1.0) 
         except Exception as e:
@@ -61,6 +74,7 @@ class SybilClustering:
 
         keep_ids = []
         covered_indices = set()
+        use_dominance = len(dominant_indices) > max(3, n * 0.6)
 
         for i in range(n):
             if i in covered_indices:
@@ -73,7 +87,12 @@ class SybilClustering:
             # Find all clones (Sybils) of 'i'
             for j in range(i + 1, n):
                 if j not in covered_indices:
-                    if sim_matrix[i, j] > self.threshold:
+                    if sim_matrix[i, j] > self.threshold or (
+                            use_dominance and
+                            i in dominant_indices and
+                            j in dominant_indices and
+                            sim_matrix[i, j] > 0.9
+                        ):
                         covered_indices.add(j)
 
         return keep_ids

@@ -1,5 +1,5 @@
 from .configLoader import Config
-from .Helpers import log_and_print, _device_from_state_dict, torch_delta_to_numpy, numpy_delta_to_torch
+from .Helpers import log_and_print, _device_from_state_dict, torch_delta_to_numpy, numpy_delta_to_torch, flatten, average_updates
 
 __all__ = [
     "Config",
@@ -9,4 +9,6 @@ __all__ = [
     "_device_from_state_dict",
     "torch_delta_to_numpy",
     "numpy_delta_to_torch",
+    "flatten",
+    "average_updates"
 ]

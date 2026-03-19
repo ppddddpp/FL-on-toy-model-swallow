@@ -99,3 +99,13 @@ def to_json_safe(obj):
     if isinstance(obj, (np.int32, np.int64)):
         return int(obj)
     return obj
+
+def flatten(grad):
+    return np.concatenate([v.flatten() for v in grad.values()])
+
+def average_updates(updates):
+    keys = list(next(iter(updates.values())).keys())
+    avg = {}
+    for k in keys:
+        avg[k] = np.mean([u[k] for u in updates.values()], axis=0)
+    return avg

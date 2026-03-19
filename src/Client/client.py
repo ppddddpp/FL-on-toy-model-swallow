@@ -95,6 +95,15 @@ class Client:
                 loss = criterion(logits, y)
                 loss.backward()
 
+                # Inject malicious gradient
+                if self.mc_grad_engine is not None:
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            grad_np = param.grad.detach().cpu().numpy()
+                            # Generate malicious gradient
+                            attacked = self.mc_grad_engine.generate({name: grad_np})[name]
+                            param.grad = torch.from_numpy(attacked).to(param.device)
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
 

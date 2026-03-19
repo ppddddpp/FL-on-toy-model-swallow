@@ -1,8 +1,7 @@
 import numpy as np
-from scipy.spatial.distance import cosine
-from collections import defaultdict
 from Helpers.Helpers import ensure_dir, save_json
 from Helpers.Helpers import log_and_print
+from sklearn.cluster import DBSCAN
 
 class MaliciousContributionsOnSybilProving:
     """
@@ -15,7 +14,7 @@ class MaliciousContributionsOnSybilProving:
         - collusion / shared vector detection
     """
 
-    def __init__(self, probe_name="sybil_proof", output_dir="logs/proofs"):
+    def __init__(self, probe_name="sybil_proof", output_dir="logs/proofs", eps=0.05):
         """
         benign_update : dict
             The real gradient for reference.
@@ -31,6 +30,7 @@ class MaliciousContributionsOnSybilProving:
         self.probe_name = probe_name
         self.output_dir = output_dir
 
+        self.eps = eps
         self.benign = None
         self.updates = {}
         self.metadatas = {}
@@ -70,39 +70,43 @@ class MaliciousContributionsOnSybilProving:
 
         mean_norm = np.mean(norms) + 1e-8
         return float(np.linalg.norm(g) / mean_norm)
-
-    def detect_collusion(self):
-        """
-        Returns dictionary:
-            { client_id: {other_client: cosine_similarity} }
-        and detects clusters of nearly identical gradients.
-        """
+    
+    def detect_density_clusters(self):
         client_ids = list(self.updates.keys())
-        vectors = {cid: self._flatten(self.updates[cid]) for cid in client_ids}
+        if len(client_ids) == 0:
+            return {}
 
-        similarities = defaultdict(dict)
-        collusion_groups = []
+        X = np.vstack([self._flatten(self.updates[cid]) for cid in client_ids])
 
-        for i in range(len(client_ids)):
-            for j in range(i + 1, len(client_ids)):
-                c1, c2 = client_ids[i], client_ids[j]
-                v1, v2 = vectors[c1], vectors[c2]
+        clustering = DBSCAN(eps=self.eps, min_samples=2, metric='cosine').fit(X)
+        labels = clustering.labels_
 
-                sim = 1 - cosine(v1, v2)  # cosine similarity
-                similarities[c1][c2] = sim
-                similarities[c2][c1] = sim
+        clusters = {}
+        for cid, label in zip(client_ids, labels):
+            if label == -1:
+                continue
 
-        # Detect colluding pairs/groups (cosine similarity very close to 1)
-        threshold = 0.995
-        for c1 in client_ids:
-            group = {c1}
-            for c2 in client_ids:
-                if c1 != c2 and similarities[c1].get(c2, 0) > threshold:
-                    group.add(c2)
-            if len(group) > 1:
-                collusion_groups.append(group)
+            label = int(label)
 
-        return similarities, collusion_groups
+            clusters.setdefault(label, []).append(cid)
+
+        return clusters
+
+    def detect_directional_alignment(self):
+        client_ids = list(self.updates.keys())
+        X = np.vstack([self._flatten(self.updates[cid]) for cid in client_ids])
+
+        mean_vec = np.mean(X, axis=0)
+        norm_mean = np.linalg.norm(mean_vec) + 1e-8
+
+        alignment_scores = {}
+        for cid, vec in zip(client_ids, X):
+            alignment_scores[cid] = float(
+                np.dot(vec, mean_vec) /
+                ((np.linalg.norm(vec) + 1e-8) * norm_mean)
+            )
+
+        return alignment_scores
 
     def detect_shared_pattern(self):
         """
@@ -135,17 +139,29 @@ class MaliciousContributionsOnSybilProving:
             for cid, grad in self.updates.items()
         }
 
-        similarities, collusion_groups = self.detect_collusion()
+        density_clusters = self.detect_density_clusters()
         shared_pattern, shared_std = self.detect_shared_pattern()
         fake_size_clients = self.detect_fake_data_size()
+        alignment_scores = self.detect_directional_alignment()
 
         attack_types = []
 
+        aligned_clients = sum(1 for v in alignment_scores.values() if v > 0.9)
+        alignment_ratio = aligned_clients / (len(alignment_scores) + 1e-8)
+
+        if alignment_ratio > 0.5:
+            attack_types.append("Directional Sybil Alignment")
+
         if any(r > 3.0 for r in amp_ratios.values()):
             attack_types.append("Amplification Attack")
+        
+        cluster_sizes = {k: len(v) for k, v in density_clusters.items()}
+        num_clustered_clients = sum(cluster_sizes.values())
+        total_clients = len(self.updates)
+        cluster_ratio = num_clustered_clients / (total_clients + 1e-8)
 
-        if collusion_groups:
-            attack_types.append("Sybil Collusion (Similarity)")
+        if any(len(c) > 2 for c in density_clusters.values()):
+            attack_types.append("Sybil Collusion (Density-Based)")
 
         if shared_pattern:
             attack_types.append("Sybil Shared Vector Attack")
@@ -158,8 +174,11 @@ class MaliciousContributionsOnSybilProving:
 
         return {
             "amplification_ratios": amp_ratios,
-            "collusion_similarity_matrix": similarities,
-            "collusion_groups": collusion_groups,
+            "alignment_scores": alignment_scores,
+            "alignment_ratio": alignment_ratio,
+            "cluster_ratio": cluster_ratio,
+            "cluster_sizes": cluster_sizes,
+            "density_clusters": density_clusters,
             "shared_vector_detected": shared_pattern,
             "shared_vector_std": shared_std,
             "fake_data_size_clients": fake_size_clients,
@@ -178,8 +197,6 @@ class MaliciousContributionsOnSybilProving:
         ensure_dir(self.output_dir)
 
         report = self.summary()
-        if "collusion_groups" in report:
-            report["collusion_groups"] = [list(group) for group in report["collusion_groups"]]
 
         save_json(report, self.output_dir / "sybil_report.json")
         return report
