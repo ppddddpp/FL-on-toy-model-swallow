@@ -2,8 +2,9 @@ import numpy as np
 import torch
 
 class SybilClustering:
-    def __init__(self, threshold: float = 0.98):
+    def __init__(self, threshold: float = 0.98, min_cluster_size: int = 3):
         self.threshold = threshold
+        self.min_cluster_size = min_cluster_size
 
     def filter_sybils(self, client_updates: dict) -> list:
         ids = list(client_updates.keys())
@@ -11,6 +12,7 @@ class SybilClustering:
         if n < 2:
             return ids
 
+        # Flatten updates
         flat_vecs = []
         for cid in ids:
             update = client_updates[cid]
@@ -34,6 +36,7 @@ class SybilClustering:
 
             flat_vecs.append(vec)
 
+        # Normalize
         X = np.vstack(flat_vecs)
         X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
 
@@ -41,39 +44,51 @@ class SybilClustering:
         sim_matrix = X @ X.T
         sim_matrix = np.nan_to_num(sim_matrix, nan=0.0)
 
-        # Directional dominance (secondary)
-        mean_vec = np.median(X, axis=0)
-        norm_mean = np.linalg.norm(mean_vec) + 1e-8
+        # Build adjacency graph
+        adj = sim_matrix > self.threshold
 
-        alignments = [
-            np.dot(vec, mean_vec) / ((np.linalg.norm(vec) + 1e-8) * norm_mean)
-            for vec in X
-        ]
-
-        dominant_indices = [i for i, a in enumerate(alignments) if a > 0.9]
-        use_dominance = len(dominant_indices) > max(3, n * 0.6)
-
-        # Clustering
-        keep_ids = []
-        covered_indices = set()
+        # Find connected components
+        visited = set()
+        clusters = []
 
         for i in range(n):
-            if i in covered_indices:
+            if i in visited:
                 continue
 
-            keep_ids.append(ids[i])
-            covered_indices.add(i)
+            stack = [i]
+            component = []
 
-            for j in range(i + 1, n):
-                if j in covered_indices:
+            while stack:
+                node = stack.pop()
+                if node in visited:
                     continue
 
-                if sim_matrix[i, j] > self.threshold or (
-                    use_dominance and
-                    i in dominant_indices and
-                    j in dominant_indices and
-                    sim_matrix[i, j] > 0.9
-                ):
-                    covered_indices.add(j)
+                visited.add(node)
+                component.append(node)
+
+                neighbors = np.where(adj[node])[0]
+                for nb in neighbors:
+                    if nb not in visited:
+                        stack.append(nb)
+
+            clusters.append(component)
+
+        # Decide Sybil vs Honest
+        keep_ids = []
+
+        for cluster in clusters:
+            if len(cluster) >= self.min_cluster_size:
+                # Check tightness
+                submatrix = sim_matrix[np.ix_(cluster, cluster)]
+                min_sim = np.min(submatrix)
+
+                if min_sim > (self.threshold - 0.01):  # e.g. 0.97
+                    # Sybil cluster -> keep 1
+                    keep_ids.append(ids[cluster[0]])
+                    continue
+
+            # Honest cluster -> keep all
+            for idx in cluster:
+                keep_ids.append(ids[idx])
 
         return keep_ids
