@@ -3,6 +3,7 @@ from Helpers.Helpers import ensure_dir, save_json
 from Helpers.Helpers import log_and_print
 from sklearn.cluster import DBSCAN
 
+
 class MaliciousContributionsOnSybilProving:
     """
     Detects Sybil amplification attacks in Federated Learning.

@@ -21,7 +21,67 @@ from Helpers.Helpers import log_and_print, flatten, average_updates
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from sklearn.metrics import pairwise_distances
 
+
+def spread_points_for_display(coords, min_sep=0.08, max_iter=300, pull=0.03):
+    """
+    Only for visualization:
+    push close 2D points apart so overlapping clients become visible.
+
+    Parameters
+    ----------
+    coords : np.ndarray of shape (n, 2)
+        Original PCA coordinates.
+    min_sep : float
+        Minimum desired separation in plot space.
+    max_iter : int
+        Number of relaxation iterations.
+    pull : float
+        Small force pulling points back toward original coords
+        so layout still resembles the PCA structure.
+    """
+    y = coords.astype(float).copy()
+    x0 = coords.astype(float).copy()
+    n = len(y)
+
+    if n <= 1:
+        return y
+
+    for _ in range(max_iter):
+        moved = False
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                delta = y[i] - y[j]
+                dist = np.linalg.norm(delta)
+
+                if dist < 1e-12:
+                    # if exactly overlapping, create deterministic direction
+                    angle = 2 * np.pi * (i + j + 1) / max(n, 2)
+                    direction = np.array([np.cos(angle), np.sin(angle)])
+                    push = 0.5 * min_sep * direction
+                    y[i] += push
+                    y[j] -= push
+                    moved = True
+
+                elif dist < min_sep:
+                    direction = delta / dist
+                    overlap = min_sep - dist
+                    push = 0.5 * overlap * direction
+                    y[i] += push
+                    y[j] -= push
+                    moved = True
+
+        # pull back slightly so the figure still resembles the original PCA map
+        y += pull * (x0 - y)
+
+        if not moved:
+            break
+
+    return y
 def main():
     BASE_DIR = Path(__file__).resolve().parent.parent
     cfg = Config.load(BASE_DIR / "config" / "config.yaml")
@@ -279,6 +339,18 @@ def main():
                     pca = PCA(n_components=2)
                     X_2d = pca.fit_transform(X)
 
+                    # Display-only spreading so overlapping clients become visible
+                    x_range = X_2d[:, 0].max() - X_2d[:, 0].min() + 1e-8
+                    y_range = X_2d[:, 1].max() - X_2d[:, 1].min() + 1e-8
+                    base_range = max(x_range, y_range)
+
+                    X_plot = spread_points_for_display(
+                        X_2d,
+                        min_sep=0.08 * base_range,   # chỉnh 0.06 -> 0.12 tùy độ dãn muốn
+                        max_iter=300,
+                        pull=0.03
+                    )
+
                     # Prepare reference for similarity
                     b_vec = flatten(benign_reference)
 
@@ -290,61 +362,112 @@ def main():
                     max_mag = magnitudes.max() + 1e-8
 
                     # Plot
-                    plt.figure()
+                    fig, ax = plt.subplots(figsize=(10, 8))
 
-                    # Clusters from prover
+                    # Pairwise cosine distances in ORIGINAL feature space
+                    # (X is already normalized above, so cosine distance is meaningful here)
+                    D = pairwise_distances(X, metric="cosine")
+
+                    # Build line segments between every pair of clients
+                    segments = []
+                    distances = []
+
+                    n = len(client_updates)
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            segments.append([X_plot[i], X_plot[j]])
+                            distances.append(D[i, j])
+
+                    distances = np.array(distances, dtype=float)
+
+                    # Avoid zero-range normalization
+                    if len(distances) > 0:
+                        vmin = float(distances.min())
+                        vmax = float(distances.max())
+                        if abs(vmax - vmin) < 1e-12:
+                            vmax = vmin + 1e-12
+
+                        # red = close, blue = far
+                        cmap = LinearSegmentedColormap.from_list(
+                            "close_red_far_blue",
+                            ["red", "blue"]
+                        )
+                        norm = Normalize(vmin=vmin, vmax=vmax)
+
+                        lc = LineCollection(
+                            segments,
+                            cmap=cmap,
+                            norm=norm,
+                            linewidths=1.5,
+                            alpha=0.7
+                        )
+                        lc.set_array(distances)
+                        ax.add_collection(lc)
+
+                        cbar = plt.colorbar(lc, ax=ax)
+                        cbar.set_label("Cosine distance (red = close, blue = far)")
+
+                    # Optional: keep cluster info if you still want it
                     clusters = prover.detect_density_clusters()
                     cluster_map = {}
                     for cluster_id, members in clusters.items():
                         for cid in members:
                             cluster_map[cid] = cluster_id
 
+                    # Draw client nodes
                     for i, cu in enumerate(client_updates):
                         cid = cu["client_id"]
                         vec = all_vectors[i]
 
-                        # Marker
-                        marker = 'x' if cid in attacker_ids else 'o'
+                        # Marker by role
+                        marker = 'o'
 
-                        # Cluster color
-                        color = cluster_map.get(cid, -1)
-
-                        # Magnitude to size
+                        # Size by update magnitude
                         mag = magnitudes[i]
                         size = 30 + 120 * (mag / max_mag)
 
-                        # Similarity to annotation
+                        # Similarity annotation
                         sim = cosine_sim(vec, b_vec)
 
-                        plt.scatter(
-                            X_2d[i, 0],
-                            X_2d[i, 1],
+                        # Node color
+                        node_color = "red" if cid in attacker_ids else "black"
+
+                        ax.scatter(
+                            X_plot[i, 0],
+                            X_plot[i, 1],
                             marker=marker,
-                            c=[color],
-                            s=size
+                            c=node_color,
+                            s=size,
+                            zorder=3
                         )
 
-                        # Show similarity on plot
-                        plt.text(
-                            X_2d[i, 0],
-                            X_2d[i, 1],
-                            f"{sim:.2f}",
-                            fontsize=7
+                        ax.text(
+                            X_plot[i, 0],
+                            X_plot[i, 1],
+                            f"{cid}\n{sim:.2f}",
+                            fontsize=7,
+                            ha="left",
+                            va="bottom"
                         )
 
-                    # Legend
-                    plt.scatter([], [], marker='o', label='Honest')
-                    plt.scatter([], [], marker='x', label='Attacker')
-                    plt.legend()
+                    # Legends
+                    ax.scatter([], [], marker='o', c='black', label='Honest')
+                    ax.scatter([], [], marker='x', c='red', label='Attacker')
+                    ax.legend()
 
-                    # Title + PCA quality
-                    plt.title(f"Client Update Clusters - Round {rnd}\nExplained var: {pca.explained_variance_ratio_.sum():.2f}")
+                    ax.set_title(
+                        f"Client Update Distance Graph\n"
+                        f"Explained var: {pca.explained_variance_ratio_.sum():.2f}"
+                    )
+                    ax.set_xlabel("PCA component 1")
+                    ax.set_ylabel("PCA component 2")
+                    ax.margins(0.15)
 
-                    # Save
-                    plt.savefig(log_dir / f"cluster_round_{rnd}.png")
-                    plt.close()
+                    plt.tight_layout()
+                    plt.savefig(log_dir / f"cluster_round_{rnd}.png", dpi=200, bbox_inches="tight")
+                    plt.close(fig)
 
-                    # Optional: save embeddings for later analysis
+                    # Optional: save embeddings
                     np.save(log_dir / f"cluster_round_{rnd}.npy", X_2d)
 
             # Update shared vector for coordinated attacks

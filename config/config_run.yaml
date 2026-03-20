@@ -29,7 +29,7 @@ enable_prover: true
 # ------------------------------------------------------------
 # Sybil Attack
 # ------------------------------------------------------------
-sybil_mode: "leader"        # static | leader | coordinated
+sybil_mode: "coordinated"        # static | leader | coordinated
 alpha: 0.8                  # smoothing factor (for coordinated mode)
 sybil_collusion: false
 sybil_use_grad: "NONE"  
